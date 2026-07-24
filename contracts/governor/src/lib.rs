@@ -27,16 +27,17 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::needless_borrow)]
 #![allow(clippy::needless_return)]
-#![allow(dead_code)]
-
 #[cfg(test)]
 mod benchmarks;
+
+#[cfg(test)]
+mod governance_tests;
 
 pub mod errors;
 pub use errors::Error;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, vec, Address, Bytes, Env, IntoVal, Map,
-    Symbol,
+    Symbol, Vec,
 };
 
 #[derive(Clone)]
@@ -83,6 +84,7 @@ fn now(env: &Env) -> u64 {
 
 /// Read GovernorConfig from instance storage (cheap, cached by the host).
 /// Instance storage is cheaper than persistent for frequently-read values.
+#[must_use]
 fn get_cfg(env: &Env) -> Result<GovernorConfig, Error> {
     env.storage()
         .instance()
@@ -146,9 +148,7 @@ impl Governor {
         reputation_contract: Option<Address>,
         dispute_contract: Option<Address>,
     ) -> Result<(), Error> {
-        if env.storage().instance().has(&CFG) {
-            return Err(Error::AlreadyInitialized);
-        }
+        governance_commons::try_init_guard(&env).map_err(|_| Error::AlreadyInitialized)?;
         let cfg = GovernorConfig {
             voting_delay,
             voting_period,
@@ -301,6 +301,28 @@ impl Governor {
         Ok(())
     }
 
+    /// Cancel an active or pending proposal. Only the original proposer may cancel.
+    pub fn cancel(env: Env, proposal_id: u64, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+        let mut props = get_props(&env);
+        let mut p = props.get(proposal_id).ok_or(Error::ProposalNotFound)?;
+
+        if p.canceled || p.executed {
+            return Err(Error::InvalidState);
+        }
+        if p.proposer != caller {
+            return Err(Error::Unauthorized);
+        }
+
+        p.canceled = true;
+        props.set(proposal_id, p);
+        env.storage().persistent().set(&PROPS, &props);
+
+        env.events()
+            .publish((symbol_short!("Cancel"), proposal_id), caller);
+        Ok(())
+    }
+
     pub fn execute(env: Env, proposal_id: u64) -> Result<(), Error> {
         let mut props: Map<u64, Proposal> = env
             .storage()
@@ -333,6 +355,36 @@ impl Governor {
         env.events()
             .publish((symbol_short!("Execute"), proposal_id), ());
         Ok(())
+    }
+
+    pub fn cleanup_expired_proposals(env: Env, caller: Address) -> Result<u32, Error> {
+        caller.require_auth();
+        let cfg = get_cfg(&env)?;
+        let mut props = get_props(&env);
+        let mut removed = 0u32;
+
+        let ids: Vec<u64> = props.keys();
+        for id in ids.iter() {
+            let p = props.get(id).unwrap();
+            let state = proposal_state(&env, &cfg, id, &p);
+            if state == 2 || state == 5 {
+                props.remove(id);
+                removed += 1;
+            }
+        }
+
+        if removed == 0 {
+            return Err(Error::CleanupEmpty);
+        }
+
+        env.storage().persistent().set(&PROPS, &props);
+
+        env.events().publish(
+            (symbol_short!("CLEANUP"), symbol_short!("PROPS")),
+            (caller, removed),
+        );
+
+        Ok(removed)
     }
 
     fn get_power(env: &Env, cfg: &GovernorConfig, voter: &Address) -> i128 {
