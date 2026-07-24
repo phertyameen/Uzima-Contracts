@@ -1,30 +1,25 @@
 use soroban_sdk::{contracterror, symbol_short, Symbol};
 
 #[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
-    // --- Access Control (100–199) ---
+    // Authorization (100–199)
     Unauthorized = 100,
-    UnauthorizedCaller = 101,
-    NotAuthorizedPauser = 102,
+    NotAuthorizedPauser = 101,
 
-    // --- Input Validation (200–299) ---
+    // Input Validation (200–299)
     InvalidAmount = 205,
-    InvalidSignature = 207,
-    InvalidCoverage = 280,
-    PolicyMismatch = 281,
+    InvalidCoverage = 210,
+    InvalidStatus = 211,
 
-    // --- Lifecycle & State (300–399) ---
+    // Lifecycle & State (300–399)
     NotInitialized = 300,
     AlreadyInitialized = 301,
     ContractPaused = 302,
-    CircuitOpen = 303,
-    InvalidStatus = 304,
-    AlreadyInState = 305,
-    DeadlineExceeded = 306,
+    AlreadyInState = 303,
 
-    // --- Entity Existence (400–499) ---
+    // Entity Existence (400–499)
     ClaimNotFound = 480,
     PreAuthNotFound = 481,
     PaymentPlanNotFound = 482,
@@ -33,35 +28,64 @@ pub enum Error {
     EligibilityCheckNotFound = 485,
     ClaimSubmissionNotFound = 486,
     EobNotFound = 487,
+    PolicyMismatch = 488,
 
-    // --- Financial & Resource (500–599) ---
+    // Financial & Resource (500–599)
     InsufficientFunds = 500,
-    StorageFull = 502,
-    FraudDetected = 580,
-    EscrowFailed = 581,
-    UnsupportedTransaction = 582,
+    EscrowFailed = 510,
+    Arithmetic = 580,
 
-    // --- Cross-Chain (700–799) ---
-    CrossChainTimeout = 702,
+    // Transactions (600–699)
+    UnsupportedTransaction = 600,
 
-    // --- Reentrancy (800–899) ---
+    // Security & Fraud (700–799)
+    FraudDetected = 700,
     Reentrancy = 800,
+
+    // Circuit Breaker (900–999)
+    CircuitOpen = 900,
+}
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
+            Error::Unauthorized => write!(f, "unauthorized"),
+            Error::NotAuthorizedPauser => write!(f, "not authorized pauser"),
+            Error::InvalidAmount => write!(f, "invalid amount"),
+            Error::InvalidCoverage => write!(f, "invalid coverage"),
+            Error::InvalidStatus => write!(f, "invalid status"),
+            Error::NotInitialized => write!(f, "not initialized"),
+            Error::AlreadyInitialized => write!(f, "already initialized"),
+            Error::ContractPaused => write!(f, "contract paused"),
+            Error::AlreadyInState => write!(f, "already in state"),
+            Error::ClaimNotFound => write!(f, "claim not found"),
+            Error::PreAuthNotFound => write!(f, "pre-auth not found"),
+            Error::PaymentPlanNotFound => write!(f, "payment plan not found"),
+            Error::InsuranceProviderNotFound => write!(f, "insurance provider not found"),
+            Error::CoveragePolicyNotFound => write!(f, "coverage policy not found"),
+            Error::EligibilityCheckNotFound => write!(f, "eligibility check not found"),
+            Error::ClaimSubmissionNotFound => write!(f, "claim submission not found"),
+            Error::EobNotFound => write!(f, "EOB not found"),
+            Error::PolicyMismatch => write!(f, "policy mismatch"),
+            Error::InsufficientFunds => write!(f, "insufficient funds"),
+            Error::EscrowFailed => write!(f, "escrow failed"),
+            Error::Arithmetic => write!(f, "arithmetic error"),
+            Error::UnsupportedTransaction => write!(f, "unsupported transaction"),
+            Error::FraudDetected => write!(f, "fraud detected"),
+            Error::Reentrancy => write!(f, "reentrancy detected"),
+            Error::CircuitOpen => write!(f, "circuit open"),
+        }
+    }
 }
 
 pub fn get_suggestion(error: Error) -> Symbol {
     match error {
         Error::Unauthorized => symbol_short!("CHK_AUTH"),
         Error::NotInitialized => symbol_short!("INIT_CTR"),
-        Error::AlreadyInitialized => symbol_short!("ALREADY"),
-        Error::ContractPaused | Error::DeadlineExceeded | Error::CrossChainTimeout => {
-            symbol_short!("RE_TRY_L")
-        },
+        Error::AlreadyInitialized | Error::AlreadyInState => symbol_short!("ALREADY"),
+        Error::ContractPaused | Error::CircuitOpen => symbol_short!("RE_TRY_L"),
         Error::InsufficientFunds => symbol_short!("ADD_FUND"),
-        Error::StorageFull => symbol_short!("CLN_OLD"),
-        Error::ClaimNotFound
-        | Error::PreAuthNotFound
-        | Error::PaymentPlanNotFound
-        | Error::InsuranceProviderNotFound => symbol_short!("CHK_ID"),
+        Error::ClaimNotFound => symbol_short!("CHK_ID"),
         _ => symbol_short!("CONTACT"),
     }
 }

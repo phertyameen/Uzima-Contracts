@@ -278,8 +278,11 @@ pub enum RbacError {
 
 #[soroban_sdk::contractclient(name = "RbacClient")]
 pub trait RbacContract {
+    #[must_use]
     fn has_role(env: Env, address: Address, role: RbacRole) -> Result<bool, RbacError>;
+    #[must_use]
     fn assign_role(env: Env, address: Address, role: RbacRole) -> Result<bool, RbacError>;
+    #[must_use]
     fn remove_role(env: Env, address: Address, role: RbacRole) -> Result<bool, RbacError>;
 }
 
@@ -332,6 +335,7 @@ pub struct HealthcarePayment;
 #[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl HealthcarePayment {
+    #[must_use]
     fn require_admin(env: &Env, caller: &Address) -> Result<(), Error> {
         let config: Config = env
             .storage()
@@ -350,12 +354,16 @@ impl HealthcarePayment {
         env.storage().instance().get(key).unwrap_or(0u64)
     }
 
-    fn next_counter(env: &Env, key: &DataKey) -> u64 {
-        let next = Self::read_counter(env, key).saturating_add(1);
+    #[must_use]
+    fn next_counter(env: &Env, key: &DataKey) -> Result<u64, Error> {
+        let next = Self::read_counter(env, key)
+            .checked_add(1)
+            .ok_or(Error::Arithmetic)?;
         env.storage().instance().set(key, &next);
-        next
+        Ok(next)
     }
 
+    #[must_use]
     fn get_policy(env: &Env, policy_id: u64) -> Result<CoveragePolicy, Error> {
         env.storage()
             .persistent()
@@ -363,6 +371,7 @@ impl HealthcarePayment {
             .ok_or(Error::CoveragePolicyNotFound)
     }
 
+    #[must_use]
     fn get_provider(env: &Env, provider_id: u64) -> Result<InsuranceProvider, Error> {
         env.storage()
             .persistent()
@@ -370,6 +379,7 @@ impl HealthcarePayment {
             .ok_or(Error::InsuranceProviderNotFound)
     }
 
+    #[must_use]
     fn validate_positive_amount(amount: i128) -> Result<(), Error> {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -377,6 +387,7 @@ impl HealthcarePayment {
         Ok(())
     }
 
+    #[must_use]
     fn require_operational(env: &Env) -> Result<(), Error> {
         if let Some(cb) = env
             .storage()
@@ -390,6 +401,7 @@ impl HealthcarePayment {
         Ok(())
     }
 
+    #[must_use]
     fn acquire_lock(env: &Env) -> Result<(), Error> {
         if env
             .storage()
@@ -466,9 +478,7 @@ impl HealthcarePayment {
         aml_contract: Address,
         rbac_contract: Address,
     ) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Config) {
-            return Err(Error::AlreadyInitialized);
-        }
+        governance_commons::try_init_guard(&env).map_err(|_| Error::AlreadyInitialized)?;
 
         let config = Config {
             admin,
@@ -530,7 +540,7 @@ impl HealthcarePayment {
             return Err(Error::InvalidCoverage);
         }
 
-        let provider_id = Self::next_counter(&env, &DataKey::InsuranceProviderCount);
+        let provider_id = Self::next_counter(&env, &DataKey::InsuranceProviderCount)?;
         let provider = InsuranceProvider {
             id: provider_id,
             name,
@@ -578,7 +588,7 @@ impl HealthcarePayment {
             return Err(Error::InvalidCoverage);
         }
 
-        let policy_id = Self::next_counter(&env, &DataKey::CoveragePolicyCount);
+        let policy_id = Self::next_counter(&env, &DataKey::CoveragePolicyCount)?;
         let policy = CoveragePolicy {
             id: policy_id,
             patient: patient.clone(),
@@ -619,11 +629,11 @@ impl HealthcarePayment {
             return Err(Error::InvalidCoverage);
         }
 
-        let check_id = Self::next_counter(&env, &DataKey::EligibilityCount);
+        let check_id = Self::next_counter(&env, &DataKey::EligibilityCount)?;
         let deductible_remaining = policy
             .deductible_total
-            .saturating_sub(policy.deductible_met)
-            .max(0);
+            .checked_sub(policy.deductible_met)
+            .ok_or(Error::Arithmetic)?;
         let eligibility = EligibilityCheck {
             id: check_id,
             policy_id,
@@ -648,7 +658,7 @@ impl HealthcarePayment {
             .set(&DataKey::LatestEligibilityByPolicy(policy_id), &check_id);
 
         env.events().publish(
-            (symbol_short!("ELIG"),),
+            (symbol_short!("elig"),),
             (policy_id, eligibility.eligible, eligibility.coverage_bps),
         );
 
@@ -674,7 +684,8 @@ impl HealthcarePayment {
             .instance()
             .get(&DataKey::ClaimCount)
             .unwrap_or(0u64)
-            .saturating_add(1);
+            .checked_add(1)
+            .ok_or(Error::Arithmetic)?;
 
         let current_time = env.ledger().timestamp();
 
@@ -767,7 +778,7 @@ impl HealthcarePayment {
             .set(&DataKey::ClaimSubmission(claim_id), &submission);
 
         env.events().publish(
-            (symbol_short!("CLAIM_EDI"),),
+            (symbol_short!("claim_edi"),),
             (claim_id, coverage_policy_id, submission.status as u32),
         );
 
@@ -793,7 +804,7 @@ impl HealthcarePayment {
             return Err(Error::UnsupportedTransaction);
         }
 
-        let enrollment_id = Self::next_counter(&env, &DataKey::CoverageEnrollmentCount);
+        let enrollment_id = Self::next_counter(&env, &DataKey::CoverageEnrollmentCount)?;
         let enrollment = CoverageEnrollment {
             id: enrollment_id,
             policy_id: coverage_policy_id,
@@ -806,7 +817,7 @@ impl HealthcarePayment {
             .persistent()
             .set(&DataKey::CoverageEnrollment(enrollment_id), &enrollment);
         env.events().publish(
-            (symbol_short!("COV_834"),),
+            (symbol_short!("cov_834"),),
             (coverage_policy_id, enrollment_id),
         );
 
@@ -997,7 +1008,7 @@ impl HealthcarePayment {
         }
 
         env.events().publish(
-            (symbol_short!("EOB"),),
+            (symbol_short!("eob"),),
             (claim_id, insurer_paid, patient_responsibility),
         );
 
@@ -1070,7 +1081,7 @@ impl HealthcarePayment {
         }
 
         env.events().publish(
-            (symbol_short!("CLAIM_PD"),),
+            (symbol_short!("claim_pd"),),
             (claim_id, claim.provider, provider_amount),
         );
 
@@ -1782,3 +1793,6 @@ impl HealthcarePayment {
 
 #[cfg(test)]
 mod test;
+
+#[cfg(test)]
+mod concurrency_tests;
