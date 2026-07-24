@@ -1,7 +1,5 @@
 #![no_std]
 //! emergency_access_override - Healthcare smart contract on Stellar blockchain.
-#![allow(dead_code)]
-
 #[cfg(test)]
 mod test;
 
@@ -10,7 +8,7 @@ mod events;
 
 pub use errors::Error;
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
 // Shared multi-sig helpers (Phase 4 migration: see issue #830)
 use governance_commons::{multi_sig, ApprovalStatus};
 
@@ -62,15 +60,12 @@ impl EmergencyAccessOverride {
         approvers: Vec<Address>,
         threshold: u32,
     ) -> Result<(), Error> {
+        governance_commons::try_init_guard(&env).map_err(|_| Error::AlreadyInitialized)?;
         admin.require_auth();
-        if env.storage().instance().has(&DataKey::Initialized) {
-            return Err(Error::AlreadyInitialized);
-        }
         // Delegate approval-set validation to the shared multi-sig helper.
         multi_sig::validate_approval_set(&approvers, threshold)
             .map_err(|_| Error::InvalidThreshold)?;
 
-        env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
@@ -87,6 +82,14 @@ impl EmergencyAccessOverride {
             .instance()
             .set(&DataKey::TrustedApprovers, &approvers);
 
+        events::record_audit_entry(
+            &env,
+            events::AuditAction::Initialized,
+            &admin,
+            None,
+            None,
+            symbol_short!("OK"),
+        );
         events::publish_initialization(&env, &admin);
         Ok(())
     }
@@ -223,13 +226,29 @@ impl EmergencyAccessOverride {
 
             if grant_count >= GLOBAL_GRANT_LIMIT {
                 // Trip circuit breaker and emit alert
-                env.storage()
-                    .instance()
-                    .set(&DataKey::CircuitBreakerTripped, &true);
-                events::publish_rate_limit_exceeded(&env, &approver, now, now);
-                return Err(Error::RateLimitExceeded);
+        env.storage()
+            .instance()
+            .set(&DataKey::CircuitBreakerTripped, &true);
+        events::record_audit_entry(
+            &env,
+            events::AuditAction::CircuitTripped,
+            &approver,
+            Some(patient.clone()),
+            Some(provider.clone()),
+            symbol_short!("GRANT"),
+        );
+        events::publish_rate_limit_exceeded(&env, &approver, now, now);
+        return Err(Error::RateLimitExceeded);
             }
 
+            events::record_audit_entry(
+                &env,
+                events::AuditAction::GrantGranted,
+                &approver,
+                Some(patient.clone()),
+                Some(provider.clone()),
+                symbol_short!("OK"),
+            );
             events::publish_emergency_access_granted(
                 &env,
                 &patient,
@@ -241,6 +260,14 @@ impl EmergencyAccessOverride {
         }
 
         env.storage().persistent().set(&key, &record);
+        events::record_audit_entry(
+            &env,
+            events::AuditAction::GrantApproved,
+            &approver,
+            Some(patient.clone()),
+            Some(provider.clone()),
+            symbol_short!("OK"),
+        );
         events::publish_emergency_access_approved(&env, &patient, &provider, &approver, now);
         Ok(false)
     }
@@ -266,6 +293,14 @@ impl EmergencyAccessOverride {
         env.storage()
             .instance()
             .set(&DataKey::GlobalGrantWindowStart, &env.ledger().timestamp());
+        events::record_audit_entry(
+            &env,
+            events::AuditAction::CircuitReset,
+            &admin,
+            None,
+            None,
+            symbol_short!("OK"),
+        );
         Ok(())
     }
 
@@ -291,6 +326,14 @@ impl EmergencyAccessOverride {
             .instance()
             .set(&DataKey::CooldownPeriod, &new_period_seconds);
 
+        events::record_audit_entry(
+            &env,
+            events::AuditAction::CooldownUpdated,
+            &admin,
+            None,
+            None,
+            symbol_short!("OK"),
+        );
         events::publish_cooldown_updated(&env, &admin, new_period_seconds);
         Ok(())
     }
@@ -319,11 +362,27 @@ impl EmergencyAccessOverride {
             .get::<_, EmergencyAccessRecord>(&key)
         {
             if record.approved && record.expiry_at > now {
+                events::record_audit_entry(
+                    &env,
+                    events::AuditAction::AccessCheck,
+                    &env.current_contract_address(),
+                    Some(patient.clone()),
+                    Some(provider.clone()),
+                    symbol_short!("TRUE"),
+                );
                 events::publish_emergency_access_checked(&env, &patient, &provider, true, now);
                 return Ok(true);
             }
         }
 
+        events::record_audit_entry(
+            &env,
+            events::AuditAction::AccessCheck,
+            &env.current_contract_address(),
+            Some(patient.clone()),
+            Some(provider.clone()),
+            symbol_short!("FALSE"),
+        );
         events::publish_emergency_access_checked(&env, &patient, &provider, false, now);
         Ok(false)
     }
@@ -356,6 +415,14 @@ impl EmergencyAccessOverride {
 
         env.storage().persistent().set(&key, &record);
 
+        events::record_audit_entry(
+            &env,
+            events::AuditAction::GrantRevoked,
+            &admin,
+            Some(patient.clone()),
+            Some(provider.clone()),
+            symbol_short!("OK"),
+        );
         events::publish_emergency_access_revoked(
             &env,
             &patient,
@@ -382,8 +449,9 @@ impl EmergencyAccessOverride {
             .ok_or(Error::NotInitialized)
     }
 
+    #[must_use]
     fn require_initialized(env: &Env) -> Result<(), Error> {
-        if !env.storage().instance().has(&DataKey::Initialized) {
+        if !governance_commons::is_initialized(env) {
             return Err(Error::NotInitialized);
         }
         Ok(())
@@ -392,7 +460,7 @@ impl EmergencyAccessOverride {
     /// On-chain health check endpoint.
     /// Returns true if the contract is initialized and operational.
     pub fn health_check(env: Env) -> bool {
-        env.storage().instance().has(&DataKey::Initialized)
+        governance_commons::is_initialized(&env)
     }
 }
 
@@ -400,7 +468,6 @@ impl EmergencyAccessOverride {
 // Issue #655: M-of-N Multi-Sig Emergency Access Override
 // ============================================================
 
-const DEFAULT_EXPIRY_SECONDS: u64 = 3600; // 1 hour
 
 #[derive(Clone, Debug)]
 #[contracttype]
