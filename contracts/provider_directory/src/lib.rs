@@ -13,6 +13,17 @@ pub enum Error {
     NotAuthorized = 4,
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
+            Error::NotInitialized => write!(f, "not initialized"),
+            Error::AlreadyInitialized => write!(f, "already initialized"),
+            Error::RateLimitExceeded => write!(f, "rate limit exceeded"),
+            Error::NotAuthorized => write!(f, "not authorized"),
+        }
+    }
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -41,9 +52,7 @@ pub struct ProviderDirectoryContract;
 #[contractimpl]
 impl ProviderDirectoryContract {
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
-        if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
-        }
+        governance_commons::try_init_guard(&env).map_err(|_| Error::AlreadyInitialized)?;
         env.storage().instance().set(&DataKey::Admin, &admin);
 
         // Set default rate limit: 10 searches per hour (3600 seconds)
@@ -126,6 +135,7 @@ impl ProviderDirectoryContract {
         Ok(Vec::new(&env))
     }
 
+    #[must_use]
     fn check_search_rate_limit(env: &Env, caller: &Address) -> Result<(), Error> {
         let is_exempt: bool = env
             .storage()
